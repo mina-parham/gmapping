@@ -19,30 +19,49 @@
 
 
 /**
+
 @mainpage slam_gmapping
+
 @htmlinclude manifest.html
+
 @b slam_gmapping is a wrapper around the GMapping SLAM library. It reads laser
 scans and odometry and computes a map. This map can be
 written to a file using e.g.
+
   "rosrun map_server map_saver static_map:=dynamic_map"
+
 <hr>
+
 @section topic ROS topics
+
 Subscribes to (name/type):
 - @b "scan"/<a href="../../sensor_msgs/html/classstd__msgs_1_1LaserScan.html">sensor_msgs/LaserScan</a> : data from a laser range scanner 
 - @b "/tf": odometry from the robot
+
+
 Publishes to (name/type):
 - @b "/tf"/tf/tfMessage: position relative to the map
+
+
 @section services
  - @b "~dynamic_map" : returns the map
+
+
 @section parameters ROS parameters
+
 Reads the following parameters from the parameter server
+
 Parameters used by our GMapping wrapper:
+
 - @b "~throttle_scans": @b [int] throw away every nth laser scan
 - @b "~base_frame": @b [string] the tf frame_id to use for the robot base pose
 - @b "~map_frame": @b [string] the tf frame_id where the robot pose on the map is published
 - @b "~odom_frame": @b [string] the tf frame_id from which odometry is read
 - @b "~map_update_interval": @b [double] time in seconds between two recalculations of the map
+
+
 Parameters used by GMapping itself:
+
 Laser Parameters:
 - @b "~/maxRange" @b [double] maximum range of the laser scans. Rays beyond this range get discarded completely. (default: maximum laser range minus 1 cm, as received in the the first LaserScan message)
 - @b "~/maxUrange" @b [double] maximum range of the laser scanner that is used for map building (default: same as maxRange)
@@ -55,27 +74,33 @@ Laser Parameters:
 - @b "~/ogain" @b [double] gain for smoothing the likelihood
 - @b "~/lskip" @b [int] take only every (n+1)th laser ray for computing a match (0 = take all rays)
 - @b "~/minimumScore" @b [double] minimum score for considering the outcome of the scanmatching good. Can avoid 'jumping' pose estimates in large open spaces when using laser scanners with limited range (e.g. 5m). (0 = default. Scores go up to 600+, try 50 for example when experiencing 'jumping' estimate issues)
+
 Motion Model Parameters (all standard deviations of a gaussian noise model)
 - @b "~/srr" @b [double] linear noise component (x and y)
 - @b "~/stt" @b [double] angular noise component (theta)
 - @b "~/srt" @b [double] linear -> angular noise component
 - @b "~/str" @b [double] angular -> linear noise component
+
 Others:
 - @b "~/linearUpdate" @b [double] the robot only processes new measurements if the robot has moved at least this many meters
 - @b "~/angularUpdate" @b [double] the robot only processes new measurements if the robot has turned at least this many rads
+
 - @b "~/resampleThreshold" @b [double] threshold at which the particles get resampled. Higher means more frequent resampling.
 - @b "~/particles" @b [int] (fixed) number of particles. Each particle represents a possible trajectory that the robot has traveled
+
 Likelihood sampling (used in scan matching)
 - @b "~/llsamplerange" @b [double] linear range
 - @b "~/lasamplerange" @b [double] linear step size
 - @b "~/llsamplestep" @b [double] linear range
 - @b "~/lasamplestep" @b [double] angular step size
+
 Initial map dimensions and resolution:
 - @b "~/xmin" @b [double] minimum x position in the map [m]
 - @b "~/ymin" @b [double] minimum y position in the map [m]
 - @b "~/xmax" @b [double] maximum x position in the map [m]
 - @b "~/ymax" @b [double] maximum y position in the map [m]
 - @b "~/delta" @b [double] size of one pixel [m]
+
 */
 
 
@@ -89,7 +114,12 @@ Initial map dimensions and resolution:
 #include "ros/ros.h"
 #include "ros/console.h"
 #include "nav_msgs/MapMetaData.h"
+//me
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <nav_msgs/Odometry.h>
 
+#include "sensor_msgs/PointCloud2.h"
+//me
 #include "gmapping/sensor/sensor_range/rangesensor.h"
 #include "gmapping/sensor/sensor_odometry/odometrysensor.h"
 
@@ -224,6 +254,8 @@ void SlamGMapping::init()
     
   if(!private_nh_.getParam("tf_delay", tf_delay_))
     tf_delay_ = transform_publish_period_;
+  //me
+  private_nh_.param("odom_topic", p_odom_topic_, std::string("odom"));
 
 }
 
@@ -236,11 +268,16 @@ void SlamGMapping::startLiveSlam()
   ss_ = node_.advertiseService("dynamic_map", &SlamGMapping::mapCallback, this);
   scan_filter_sub_ = new message_filters::Subscriber<sensor_msgs::LaserScan>(node_, "scan", 5);
   scan_filter_ = new tf::MessageFilter<sensor_msgs::LaserScan>(*scan_filter_sub_, tf_, odom_frame_, 5);
-  scan_filter_->registerCallback(boost::bind(&SlamGMapping::laserCallback, this, _1));
-
+  //me
+  scan_filter_->registerCallback(boost::bind(&SlamGMapping::laser2Callback, this, _1));
+  odomSubscriber_ = private_nh_.subscribe(p_odom_topic_, 10, &SlamGMapping::odomCallback, this);
+  //me
   transform_thread_ = new boost::thread(boost::bind(&SlamGMapping::publishLoop, this, transform_publish_period_));
 }
-
+void SlamGMapping::odomCallback(const nav_msgs::Odometry q){
+	tf::Matrix3x3 m(tf::Quaternion(q.pose.pose.orientation.x,q.pose.pose.orientation.y,q.pose.pose.orientation.z,q.pose.pose.orientation.w));
+m.getRPY(my_roll, my_pitch, my_yaw);
+}
 void SlamGMapping::startReplay(const std::string & bag_fname, std::string scan_topic)
 {
   double transform_publish_period;
@@ -295,7 +332,7 @@ void SlamGMapping::startReplay(const std::string & bag_fname, std::string scan_t
       {
         tf::StampedTransform t;
         tf_.lookupTransform(s_queue.front().first->header.frame_id, odom_frame_, s_queue.front().first->header.stamp, t);
-        this->laserCallback(s_queue.front().first);
+        this->laser2Callback(s_queue.front().first);
         s_queue.pop();
       }
       // If tf does not have the data yet
@@ -568,8 +605,14 @@ SlamGMapping::addScan(const sensor_msgs::LaserScan& scan, GMapping::OrientedPoin
   return gsp_->processScan(reading);
 }
 
-void
-SlamGMapping::laserCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
+void SlamGMapping::laser2Callback(const sensor_msgs::LaserScan::ConstPtr& scan){
+	if (my_pitch > 0.0174533 || my_roll > 0.0174533 || my_pitch < -0.0174533 || my_roll < -0.0174533)
+		ROS_INFO("fuck this shit");
+	else
+		SlamGMapping::laserCallback(scan);
+}
+
+void SlamGMapping::laserCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
 {
   laser_count_++;
   if ((laser_count_ % throttle_scans_) != 0)
@@ -764,3 +807,4 @@ void SlamGMapping::publishTransform()
   tfB_->sendTransform( tf::StampedTransform (map_to_odom_, tf_expiration, map_frame_, odom_frame_));
   map_to_odom_mutex_.unlock();
 }
+
